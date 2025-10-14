@@ -170,7 +170,10 @@ client.on("guildMemberAdd", async (member) => {
       ],
     });
 
-    await verifyChannel.send(`👋 Welcome ${member}! Please verify yourself here.`);
+    await verifyChannel.send(`👋 welcome ${member}! please verify yourself here by telling us:
+1. any of your social media profiles
+2. who invited you?
+3. how hard you work?`);
     console.log(`Created channel ${verifyChannel.name} for ${member.user.tag}`);
   } catch (err) {
     console.error("Error creating verify channel:", err);
