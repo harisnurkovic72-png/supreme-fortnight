@@ -1,30 +1,66 @@
 require("dotenv").config();
-const { 
-  Client, 
-  GatewayIntentBits, 
-  Partials, 
-  REST, 
-  Routes, 
+const keep_alive = require('./keep_alive.js');
+const {
+  Client,
+  GatewayIntentBits,
+  Partials,
+  REST,
+  Routes,
   SlashCommandBuilder,
   PermissionsBitField
 } = require("discord.js");
-const sqlite3 = require("sqlite3").verbose();
+const { Pool } = require("pg");
+const path = require("path");
 
 // === CONFIG ===
-const TOKEN = process.env.DISCORD_TOKEN;
+const TOKEN = process.env.DISCORD_TOKEN || process.env.TOKEN;
 const OWNER_ID = process.env.OWNER_ID;
 const CLIENT_ID = process.env.CLIENT_ID;
+const DATABASE_URL = process.env.DATABASE_URL; // set on Render
 // ===============
 
-// === DATABASE SETUP ===
-const db = new sqlite3.Database("./balances.db");
-db.run("CREATE TABLE IF NOT EXISTS balances (user_id TEXT PRIMARY KEY, balance REAL)");
+// === DATABASE SETUP (Postgres) ===
+// Configure pool. For Render and many managed DBs we need ssl: { rejectUnauthorized: false }
+const connectionOptions = DATABASE_URL
+  ? { connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } }
+  : null;
+
+const pool = connectionOptions ? new Pool(connectionOptions) : null;
+
+async function ensureDB() {
+  if (!pool) {
+    console.warn("No DATABASE_URL found — running without persistent DB.");
+    return;
+  }
+  // Create table if not exists
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS balances (
+      user_id TEXT PRIMARY KEY,
+      balance DOUBLE PRECISION DEFAULT 0
+    );
+  `);
+  console.log("✅ Ensured balances table exists (Postgres).");
+}
+
+// === Initialize DB (async) ===
+(async () => {
+  try {
+    if (pool) {
+      await pool.connect(); // optional - will throw if bad config
+      await ensureDB();
+      console.log("✅ Connected to Postgres");
+    }
+  } catch (err) {
+    console.error("Database connection error:", err);
+    // Do not exit; bot can still run in degraded mode if you want
+  }
+})();
 
 // === BOT INITIALIZATION ===
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers, // needed for guildMemberAdd
+    GatewayIntentBits.GuildMembers,
   ],
   partials: [Partials.Channel],
 });
@@ -50,6 +86,7 @@ const commands = [
 ];
 
 // === REGISTER SLASH COMMANDS ===
+if (!TOKEN) console.warn("No DISCORD_TOKEN / TOKEN env var found.");
 const rest = new REST({ version: "10" }).setToken(TOKEN);
 (async () => {
   try {
@@ -63,26 +100,32 @@ const rest = new REST({ version: "10" }).setToken(TOKEN);
   }
 })();
 
-// === HELPER FUNCTIONS ===
-function getBalance(userId, callback) {
-  db.get("SELECT balance FROM balances WHERE user_id = ?", [userId], (err, row) => {
-    if (err) return callback(err);
-    callback(null, row ? row.balance : 0);
-  });
+// === HELPER FUNCTIONS (Postgres-backed) ===
+async function getBalance(userId) {
+  if (!pool) return 0;
+  const res = await pool.query("SELECT balance FROM balances WHERE user_id = $1", [userId]);
+  return res.rows[0] ? parseFloat(res.rows[0].balance) : 0;
 }
 
-function addBalance(userId, amount) {
-  db.run(
-    "INSERT INTO balances (user_id, balance) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET balance = balance + ?",
-    [userId, amount, amount]
+async function addBalance(userId, amount) {
+  if (!pool) return;
+  // Upsert pattern: insert or update
+  await pool.query(
+    `INSERT INTO balances (user_id, balance)
+     VALUES ($1, $2)
+     ON CONFLICT (user_id) DO UPDATE
+     SET balance = balances.balance + EXCLUDED.balance;`,
+    [userId, amount]
   );
 }
 
-function getLeaderboard(limit, callback) {
-  db.all("SELECT user_id, balance FROM balances ORDER BY balance DESC LIMIT ?", [limit], (err, rows) => {
-    if (err) return callback(err);
-    callback(null, rows || []);
-  });
+async function getLeaderboard(limit = 15) {
+  if (!pool) return [];
+  const res = await pool.query(
+    "SELECT user_id, balance FROM balances ORDER BY balance DESC LIMIT $1",
+    [limit]
+  );
+  return res.rows || [];
 }
 
 // === BOT EVENTS ===
@@ -96,15 +139,13 @@ client.on("guildMemberAdd", async (member) => {
     const guild = member.guild;
     const owner = await guild.members.fetch(OWNER_ID);
 
-    // Create a channel name like "verify-username"
     const channelName = `verify-${member.user.username}`
       .toLowerCase()
       .replace(/[^a-z0-9-]/g, "");
 
-    // Create the private channel
     const verifyChannel = await guild.channels.create({
       name: channelName,
-      type: 0, // GUILD_TEXT
+      type: 0,
       permissionOverwrites: [
         {
           id: guild.roles.everyone,
@@ -129,7 +170,6 @@ client.on("guildMemberAdd", async (member) => {
       ],
     });
 
-    // Optional welcome message
     await verifyChannel.send(`👋 Welcome ${member}! Please verify yourself here.`);
     console.log(`Created channel ${verifyChannel.name} for ${member.user.tag}`);
   } catch (err) {
@@ -145,10 +185,13 @@ client.on("interactionCreate", async (interaction) => {
 
   if (commandName === "balance") {
     await interaction.deferReply({ ephemeral: true });
-    getBalance(interaction.user.id, (err, balance) => {
-      if (err) return interaction.editReply("Error retrieving your balance.");
-      interaction.editReply(`💰 Your current balance is **${balance.toFixed(2)}**`);
-    });
+    try {
+      const balance = await getBalance(interaction.user.id);
+      await interaction.editReply(`💰 Your current balance is **${balance.toFixed(2)}**`);
+    } catch (err) {
+      console.error("Balance error:", err);
+      await interaction.editReply("Error retrieving your balance.");
+    }
   }
 
   else if (commandName === "verify") {
@@ -160,8 +203,13 @@ client.on("interactionCreate", async (interaction) => {
     const member = interaction.options.getUser("member");
     const inviter = interaction.options.getUser("inviter");
 
-    addBalance(inviter.id, 0.2);
-    interaction.editReply(`✅ Verified **${member.username}** was invited by **${inviter.username}**.\nAdded **0.2** to ${inviter.username}'s balance.`);
+    try {
+      await addBalance(inviter.id, 0.2);
+      await interaction.editReply(`✅ Verified **${member.username}** was invited by **${inviter.username}**.\nAdded **0.2** to ${inviter.username}'s balance.`);
+    } catch (err) {
+      console.error("Verify error:", err);
+      await interaction.editReply("Error updating balance.");
+    }
   }
 
   else if (commandName === "unverify") {
@@ -173,24 +221,31 @@ client.on("interactionCreate", async (interaction) => {
     const member = interaction.options.getUser("member");
     const inviter = interaction.options.getUser("inviter");
 
-    addBalance(inviter.id, -0.2); // subtract 0.2
-
-    interaction.editReply(`↩️ Unverified **${member.username}** who was invited by **${inviter.username}**.\nRemoved **0.2** from ${inviter.username}'s balance.`);
+    try {
+      await addBalance(inviter.id, -0.2);
+      await interaction.editReply(`↩️ Unverified **${member.username}** who was invited by **${inviter.username}**.\nRemoved **0.2** from ${inviter.username}'s balance.`);
+    } catch (err) {
+      console.error("Unverify error:", err);
+      await interaction.editReply("Error updating balance.");
+    }
   }
 
   else if (commandName === "leaderboard") {
     await interaction.deferReply();
 
-    getLeaderboard(15, (err, rows) => {
-      if (err) return interaction.editReply("Error retrieving leaderboard.");
+    try {
+      const rows = await getLeaderboard(15);
       if (!rows.length) return interaction.editReply("🏆 No data yet!");
 
       const formatted = rows
-        .map((row, i) => `${i + 1}. <@${row.user_id}> — **${row.balance.toFixed(2)}**`)
+        .map((row, i) => `${i + 1}. <@${row.user_id}> — **${parseFloat(row.balance).toFixed(2)}**`)
         .join("\n");
 
-      interaction.editReply(`🏆 **Top 15 Leaderboard**\n\n${formatted}`);
-    });
+      await interaction.editReply(`🏆 **Top 15 Leaderboard**\n\n${formatted}`);
+    } catch (err) {
+      console.error("Leaderboard error:", err);
+      await interaction.editReply("Error retrieving leaderboard.");
+    }
   }
 });
 
