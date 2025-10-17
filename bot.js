@@ -77,7 +77,7 @@ const commands = [
     .addUserOption(opt => opt.setName("inviter").setDescription("User who invited the member").setRequired(true)),
   new SlashCommandBuilder()
     .setName("unverify")
-    .setDescription("Undo a verification (owner only, removes 0.2 from inviter)")
+    .setDescription("Undo a verification (owner only, removes 0.4 from inviter)")
     .addUserOption(opt => opt.setName("member").setDescription("Member to unverify").setRequired(true))
     .addUserOption(opt => opt.setName("inviter").setDescription("Inviter to remove balance from").setRequired(true)),
   new SlashCommandBuilder()
@@ -207,8 +207,8 @@ client.on("interactionCreate", async (interaction) => {
     const inviter = interaction.options.getUser("inviter");
 
     try {
-      await addBalance(inviter.id, 0.2);
-      await interaction.editReply(`✅ Verified **${member.username}** was invited by **${inviter.username}**.\nAdded **0.2** to ${inviter.username}'s balance.`);
+      await addBalance(inviter.id, 0.4);
+      await interaction.editReply(`✅ Verified **${member.username}** was invited by **${inviter.username}**.\nAdded **0.4** to ${inviter.username}'s balance.`);
     } catch (err) {
       console.error("Verify error:", err);
       await interaction.editReply("Error updating balance.");
@@ -225,8 +225,8 @@ client.on("interactionCreate", async (interaction) => {
     const inviter = interaction.options.getUser("inviter");
 
     try {
-      await addBalance(inviter.id, -0.2);
-      await interaction.editReply(`↩️ Unverified **${member.username}** who was invited by **${inviter.username}**.\nRemoved **0.2** from ${inviter.username}'s balance.`);
+      await addBalance(inviter.id, -0.4);
+      await interaction.editReply(`↩️ Unverified **${member.username}** who was invited by **${inviter.username}**.\nRemoved **0.4** from ${inviter.username}'s balance.`);
     } catch (err) {
       console.error("Unverify error:", err);
       await interaction.editReply("Error updating balance.");
